@@ -2,12 +2,75 @@
 #include<stdlib.h>
 #include<string.h>
 #include<unistd.h>
+#include<sys/types.h>
+#include<sys/wait.h>
 
 #define MAX_LINE 80 /*The maximum length command*/
 #define BUFF_SIZE 32
 #define PNULL NULL
 #define TOK_DELIMITER " \t\n\r"
 
+/******************************************************************************
+ * Check if user included "&" in the command
+ * ***************************************************************************/
+int check_ampersand(char** args)
+{
+	int i = 1, j = 0;
+	while(NULL != args[i])
+	{
+		/*check the presence of "&" at the end of line*/
+		if((strcmp(args[i], "&") == 0) && (args[i+1] == NULL))
+		{
+			args[i] = NULL;
+			return 1;
+		}
+	}
+
+	/*check if "&" is appended to the last command in the line
+	 * eg: ps&, tcpdump&
+	 */
+	i--;
+	while('\0' != args[i][j])
+	{
+		if('&' == args[i][j])
+		{
+			args[i][j] = '\0';
+			return 1;
+		}
+		j++;
+	}
+
+	return 0;
+}
+/******************************************************************************
+ * Execute the command using child process
+ * ***************************************************************************/
+void execute_cmd(char** args, int should_wait)
+{
+	pid_t pid;
+	
+	pid = fork();
+
+	if(pid < 0)
+	{
+		/*error in spawning  child process*/
+		perror("osh");
+		return;
+	}
+	else if(pid == 0)
+	{
+		/*child process executes the command*/
+		if(-1 == execvp(args[0], args))
+			perror("osh");
+		exit(EXIT_FAILURE);
+	}
+	else
+	{
+		if(should_wait)
+			wait(NULL);
+	}
+
+}
 /******************************************************************************
  * Split line into tokens, creating an array of command input by the user
  * ***************************************************************************/
@@ -78,10 +141,11 @@ int main(int argc, char **argv)
 		input = read_line();
 		split_line(input, args);
 
-		if(strcmp(args[0], "exit") == 0)
+		if(NULL == args[0])
+			continue;
+		else if(strcmp(args[0], "exit") == 0)
 			should_run = 0;
-
-		if(strcmp(args[0], "cd")== 0)
+		else if(strcmp(args[0], "cd")== 0)
 		{
 			if(args[1] == NULL)
 			{
@@ -94,16 +158,18 @@ int main(int argc, char **argv)
 				return 1;
 			}
 		}
-
-
-		execvp(args[0], args);
-
-		/**
-		 * After reading user input, the steps are:
-		 * (1) fork a child process using fork()
-		 * (2) the child process will invoke execvp()
-		 * (3) parent will invoke wait() unless command included &
-		 */
+		else
+		{
+			/**
+                 	* After reading user input, the steps are:
+                 	* (1) fork a child process using fork()
+                 	* (2) the child process will invoke execvp()
+                 	* (3) parent will invoke wait() unless command included &
+                 	*/
+			
+			int should_wait = check_ampersand(args);
+			execute_cmd(args, should_wait);
+		}
 
 	}
 
