@@ -5,11 +5,17 @@
 #include<sys/types.h>
 #include<sys/wait.h>
 #include<assert.h>
+#include<fcntl.h>
 
 #define MAX_LINE 80 /*The maximum length command*/
 #define BUFF_SIZE 32
 #define PNULL NULL
 #define TOK_DELIMITER " \t\n\r"
+
+typedef struct{
+	int flag;
+	char* fileName;
+}redirect_st;
 
 /******************************************************************************
  * Check if user included "&" in the command
@@ -44,13 +50,38 @@ int check_ampersand(char** args)
 
 	return 1;
 }
+
 /******************************************************************************
  * Execute the command using child process
  * ***************************************************************************/
-void execute_cmd(char** args, int should_wait)
+void execute_cmd(char** args, int should_wait, redirect_st* redirect)
 {
 	pid_t pid;
+	int inputFD = STDIN_FILENO;
+	int outputFD = STDOUT_FILENO;
 	
+	if(0 != redirect->flag)
+        {
+                if(1 == redirect->flag)
+                {
+			outputFD = open(redirect->fileName, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			if(outputFD < 0)
+			{
+				perror("osh");
+				return;
+			}
+                }
+                else if(2 == redirect->flag)
+                {
+			inputFD = open(redirect->fileName, O_RDONLY);
+			if(inputFD < 0)
+			{
+				perror("osh");
+				return;
+			}
+                }
+        }
+
 	pid = fork();
 
 	if(pid < 0)
@@ -61,6 +92,17 @@ void execute_cmd(char** args, int should_wait)
 	}
 	else if(pid == 0)
 	{
+		if(STDIN_FILENO != inputFD)
+		{
+			dup2(inputFD, STDIN_FILENO);
+			close(inputFD);
+		}
+		else if(STDOUT_FILENO != outputFD)
+		{
+			dup2(outputFD, STDOUT_FILENO);
+			close(outputFD);
+		}
+
 		/*child process executes the command*/
 		if(-1 == execvp(args[0], args))
 			perror("osh");
@@ -70,9 +112,19 @@ void execute_cmd(char** args, int should_wait)
 	{
 		if(should_wait)
 			wait(NULL);
+
+		if(0 != redirect->flag)
+		{
+			if(inputFD != STDIN_FILENO)
+				close(inputFD);
+			else if(outputFD != STDOUT_FILENO)
+				close(outputFD);
+		}
 	}
 
+
 }
+
 /******************************************************************************
  * Split line into tokens, creating an array of command input by the user
  * ***************************************************************************/
@@ -106,6 +158,7 @@ void split_line(char* line, char** tokens)
 	tokens[position] = PNULL;
 	return;
 }
+
 /******************************************************************************
  * Read a line from stdin
  *****************************************************************************/
@@ -128,6 +181,75 @@ char* read_line(void)
 
 	return line;
 }
+/******************************************************************************
+ * Check for redirection
+ * ***************************************************************************/
+redirect_st* check_redirection(char** args)
+{
+	redirect_st* redirect = (redirect_st*)malloc(sizeof(redirect_st));
+	int i = 0;
+
+	while(NULL != args[i])
+	{
+		if(strcmp(args[i], ">") == 0)
+		{
+			redirect->flag = 1;
+			redirect->fileName = args[i+1];
+			args[i] = NULL;
+			return redirect;
+		}
+		else if(strcmp(args[i], "<") == 0)
+		{
+			redirect->flag = 2;
+			redirect->fileName = args[i+1];
+			args[i] = NULL;
+			return redirect;
+		}
+	
+		i++;
+	}
+	
+	redirect->flag = 0;
+	redirect->fileName = 0;
+
+	return redirect;
+}
+
+/******************************************************************************
+ * Execute the command
+ * ***************************************************************************/
+int execute(char **args)
+{
+	if(strcmp(args[0], "cd")== 0)
+        {
+        	if(args[1] == NULL)
+                {
+                	fprintf(stderr,"osh: expected arguments to \"cd\"\n");
+                        return 1;
+                }
+                else if(0 != chdir(args[1]))
+                {
+                	perror("osh");
+                        return 1;
+                }
+	}
+        else
+        {
+        	/**
+                * After reading user input, the steps are:
+                * (1) fork a child process using fork()
+                * (2) the child process will invoke execvp()
+                * (3) parent will invoke wait() unless command included &
+                */
+
+		int should_wait = check_ampersand(args);
+		redirect_st* redirect = check_redirection(args);
+                execute_cmd(args, should_wait, redirect);
+	}
+
+	return 0;
+}
+
 
 int main(int argc, char **argv)
 {
@@ -158,76 +280,32 @@ int main(int argc, char **argv)
 				fprintf(stderr,"osh: No commands in history\n");
 				continue;
 			}
-
-			if(strcmp(lastCmd[0], "cd")== 0)
-                	{
-                        	if(lastCmd[1] == NULL)
-                        	{
-                                	fprintf(stderr,"osh: expected arguments to \"cd\"\n");
-                                	return 1;
-                        	}
-                        	else if(0 != chdir(lastCmd[1]))
-                        	{
-                                	perror("osh");
-                                	return 1;
-                        	}
-                	}
-                	else
-                	{		
-                        	/**
-                        	* After reading user input, the steps are:
-                        	* (1) fork a child process using fork()
-                        	* (2) the child process will invoke execvp()
-                        	* (3) parent will invoke wait() unless command included &
-                        	*/
-
-                        	int should_wait = check_ampersand(lastCmd);
-                        	execute_cmd(lastCmd, should_wait);
-                	}
+	
+			if(0 != execute(lastCmd))
+				return 1;
+			
 		}
 		else
 		{
-			/*write the command in the history*/
-			fprintf(fp,"%s\n", input);
-		
-			/*copy the command in lastCmd*/
-			memset(lastCmd, 0, sizeof(lastCmd));
-			while(NULL != args[idx])
-			{
-				lastCmd[idx] = args[idx];
-				idx++;
-			};
-			lastCmd[idx] = NULL;
-
-
 			if(strcmp(args[0], "exit") == 0)
 				should_run = 0;
-			else if(strcmp(args[0], "cd")== 0)
-			{
-				if(args[1] == NULL)
-				{
-					fprintf(stderr,"osh: expected arguments to \"cd\"\n");
-					return 1;	
-				}
-				else if(0 != chdir(args[1]))
-				{
-					perror("osh");
-					return 1;
-				}
-			}
 			else
 			{
-				/**
-                 		* After reading user input, the steps are:
-                 		* (1) fork a child process using fork()
-                 		* (2) the child process will invoke execvp()
-                 		* (3) parent will invoke wait() unless command included &
-                 		*/
-			
-				int should_wait = check_ampersand(args);
-				execute_cmd(args, should_wait);
-			}
+				/*write the command in the history*/
+                        	fprintf(fp,"%s\n", input);
 
+                        	/*copy the command in lastCmd*/
+                        	memset(lastCmd, 0, sizeof(lastCmd));
+                        	while(NULL != args[idx])
+                        	{
+                                	lastCmd[idx] = args[idx];
+                                	idx++;
+                        	};
+                        	lastCmd[idx] = NULL;
+
+				if(0 != execute(args))
+					return 1;
+			}
 		}
 	}
 
