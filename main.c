@@ -11,11 +11,19 @@
 #define BUFF_SIZE 32
 #define PNULL NULL
 #define TOK_DELIMITER " \t\n\r"
+#define READ_END 0
+#define WRITE_END 1
 
 typedef struct{
 	int flag;
 	char* fileName;
 }redirect_st;
+
+typedef struct{
+	int flag;
+	char** cmd1;
+	char** cmd2;
+}pipe_st;
 
 /******************************************************************************
  * Check if user included "&" in the command
@@ -54,11 +62,14 @@ int check_ampersand(char** args)
 /******************************************************************************
  * Execute the command using child process
  * ***************************************************************************/
-void execute_cmd(char** args, int should_wait, redirect_st* redirect)
+void execute_cmd(char** args, int should_wait, redirect_st* redirect, pipe_st* pipeCmd)
 {
 	pid_t pid;
+	int pipeFD[2];
 	int inputFD = STDIN_FILENO;
 	int outputFD = STDOUT_FILENO;
+	int pipePID1 = 0;
+	int pipePID2 = 0;
 	
 	if(0 != redirect->flag)
         {
@@ -92,15 +103,75 @@ void execute_cmd(char** args, int should_wait, redirect_st* redirect)
 	}
 	else if(pid == 0)
 	{
-		if(STDIN_FILENO != inputFD)
+		if(0 != redirect->flag)
 		{
-			dup2(inputFD, STDIN_FILENO);
-			close(inputFD);
+			if(STDIN_FILENO != inputFD)
+			{
+				dup2(inputFD, STDIN_FILENO);
+				close(inputFD);
+			}
+			else if(STDOUT_FILENO != outputFD)
+			{
+				dup2(outputFD, STDOUT_FILENO);
+				close(outputFD);
+			}
 		}
-		else if(STDOUT_FILENO != outputFD)
+		else if(1 == pipeCmd->flag)
 		{
-			dup2(outputFD, STDOUT_FILENO);
-			close(outputFD);
+			if(pipe(pipeFD) == -1)
+			{
+				perror("osh");
+				return;
+			}
+
+			pipePID1 = fork();
+
+			if(pipePID1 < 0)
+			{
+				perror("osh");
+				return;
+			}
+			else if(pipePID1 == 0)
+			{
+				close(pipeFD[READ_END]);
+
+				dup2(pipeFD[WRITE_END], STDOUT_FILENO);
+
+				close(pipeFD[WRITE_END]);
+
+				if(-1 == execvp(pipeCmd->cmd1[0], pipeCmd->cmd1))
+					perror("osh");
+				exit(EXIT_FAILURE);
+			}
+
+			pipePID2 = fork();
+
+			if(pipePID2 < 0)
+			{
+				perror("osh");
+				return;
+			}
+			else if(pipePID2 == 0)
+			{
+				close(pipeFD[WRITE_END]);
+
+				dup2(pipeFD[READ_END], STDIN_FILENO);
+
+				close(pipeFD[READ_END]);
+
+
+				if(-1 == execvp(pipeCmd->cmd2[0], pipeCmd->cmd2))
+					perror("osh");
+				exit(EXIT_FAILURE);
+			}
+			
+			/*parent process*/
+			close(pipeFD[READ_END]);
+			close(pipeFD[WRITE_END]);
+
+			waitpid(pipePID1, NULL, 0);
+			waitpid(pipePID2, NULL, 0);
+			exit(EXIT_SUCCESS);
 		}
 
 		/*child process executes the command*/
@@ -113,13 +184,6 @@ void execute_cmd(char** args, int should_wait, redirect_st* redirect)
 		if(should_wait)
 			wait(NULL);
 
-		if(0 != redirect->flag)
-		{
-			if(inputFD != STDIN_FILENO)
-				close(inputFD);
-			else if(outputFD != STDOUT_FILENO)
-				close(outputFD);
-		}
 	}
 
 
@@ -216,9 +280,37 @@ redirect_st* check_redirection(char** args)
 }
 
 /******************************************************************************
+ * Check for pipe
+ * ***************************************************************************/
+pipe_st* check_pipe(char** args)
+{
+	pipe_st* pipeCmd = (pipe_st*)malloc(sizeof(pipe_st));
+	int i = 0;
+
+	while(NULL != args[i])
+	{
+		if(strcmp(args[i],"|") == 0)
+		{
+			pipeCmd->flag = 1;
+			pipeCmd->cmd1 = &args[0];
+			args[i] = NULL;
+			pipeCmd->cmd2 = &args[i+1];
+			return pipeCmd;
+		}
+		i++;
+	}
+
+	pipeCmd->flag = 0;
+	pipeCmd->cmd1 = NULL;
+	pipeCmd->cmd2 = NULL;
+
+	return pipeCmd;
+}
+
+/******************************************************************************
  * Execute the command
  * ***************************************************************************/
-int execute(char **args)
+int execute(char** args)
 {
 	if(strcmp(args[0], "cd")== 0)
         {
@@ -244,7 +336,8 @@ int execute(char **args)
 
 		int should_wait = check_ampersand(args);
 		redirect_st* redirect = check_redirection(args);
-                execute_cmd(args, should_wait, redirect);
+		pipe_st* pipeCmd = check_pipe(args);
+                execute_cmd(args, should_wait, redirect, pipeCmd);
 	}
 
 	return 0;
